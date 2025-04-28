@@ -10,7 +10,6 @@ ENV/
 
 # ملفات الاعتماد والبيانات الحساسة
 client_secret_*.json
-*.json
 credentials.json
 sheet-bot-*.json
 temp_service_account.json
@@ -19,9 +18,6 @@ temp_service_account.json
 *.log
 demo_products.pkl
 logs/
-
-# ملفات الاختبار
-test_*.py
 
 # ملفات النظام
 .DS_Store
