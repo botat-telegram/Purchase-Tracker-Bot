@@ -1,4 +1,4 @@
-# التجاهلات الأساسية
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -8,21 +8,21 @@ venv/
 env/
 ENV/
 
-# ملفات الاعتماد والبيانات الحساسة
+# بيانات الاعتماد والملفات الحساسة
 client_secret_*.json
 credentials.json
 sheet-bot-*.json
 temp_service_account.json
 
-# ملفات السجل والبيانات المؤقتة
+# البيانات المؤقتة والسجلات
+data/
 *.log
-demo_products.pkl
 logs/
 
 # ملفات النظام
 .DS_Store
 Thumbs.db
 
-# IDE
+# بيئات التطوير
 .vscode/
 .idea/

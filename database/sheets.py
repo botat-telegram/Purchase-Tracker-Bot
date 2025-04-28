@@ -37,7 +37,16 @@ DEMO_MODE = False
 DEMO_PRODUCTS: List[Dict] = []
 
 # ملف لتخزين المنتجات المضافة
-DEMO_DATA_FILE = "demo_products.pkl"
+DEMO_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DEMO_DATA_FILE = os.path.join(DEMO_DATA_DIR, "demo_products.pkl")
+
+# تأكد من وجود مجلد البيانات
+if not os.path.exists(DEMO_DATA_DIR):
+    try:
+        os.makedirs(DEMO_DATA_DIR, exist_ok=True)
+        logger.info(f"تم إنشاء مجلد البيانات: {DEMO_DATA_DIR}")
+    except Exception as e:
+        logger.error(f"فشل في إنشاء مجلد البيانات: {str(e)}")
 
 # تحميل المنتجات السابقة من الملف إذا كان موجوداً
 try:
