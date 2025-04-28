@@ -1,0 +1,6 @@
+# متطلبات البوت
+python-telegram-bot==20.7  # مكتبة Telegram Bot API
+gspread==5.12.3           # مكتبة Google Sheets API
+oauth2client==4.1.3       # مكتبة المصادقة لـ Google API
+python-dotenv==1.0.0      # مكتبة قراءة المتغيرات البيئية
+watchdog==3.0.0          # مكتبة مراقبة الملفات (للتطوير)

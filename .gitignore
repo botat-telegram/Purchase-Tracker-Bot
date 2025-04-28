@@ -1,0 +1,32 @@
+# التجاهلات الأساسية
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.venv
+env/
+ENV/
+
+# ملفات الاعتماد والبيانات الحساسة
+client_secret_*.json
+*.json
+credentials.json
+sheet-bot-*.json
+temp_service_account.json
+
+# ملفات السجل والبيانات المؤقتة
+*.log
+demo_products.pkl
+logs/
+
+# ملفات الاختبار
+test_*.py
+
+# ملفات النظام
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
