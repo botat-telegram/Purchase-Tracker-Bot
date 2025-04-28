@@ -1,8 +1,13 @@
 import asyncio
 import logging
 import os
+import sys
 import json
 from datetime import datetime
+
+# إضافة المجلد الرئيسي إلى مسار البحث
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -32,8 +37,11 @@ async def add_products_to_sheet():
     
     logger.info("جاري الاتصال بـ Google Sheets...")
     
+    # الحصول على المسار المطلق للمجلد الرئيسي
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
     # اختيار ملف الاعتماد
-    credentials_file = "sheet-bot-444713-d558e2ce2ee8.json"
+    credentials_file = os.path.join(root_dir, "sheet-bot-444713-d558e2ce2ee8.json")
     
     try:
         # صلاحيات Google Sheets و Google Drive
