@@ -6,6 +6,9 @@
 2. التحقق من وجود ملفات الاعتماد المطلوبة
 3. تهيئة السجلات
 4. بدء تشغيل البوت
+
+تم إصلاح مشكلة استيراد gemini_confirmation_callback واستبدالها بـ gemini_callback_handler
+وإضافة تحقق من نسخ البوت المتعددة لمنع خطأ "Conflict: terminated by other getUpdates request"
 """
 
 import os
