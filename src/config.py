@@ -10,6 +10,10 @@ load_dotenv()
 
 # توكن البوت
 TOKEN: Final = os.getenv('TELEGRAM_TOKEN')
+# مفتاح جوجل شيتس (إذا كان مطلوباً)
+GOOGLE_SHEETS_KEY: Final = os.getenv('GOOGLE_SHEETS_KEY')
+# مفتاح Gemini (للاستخدام المركزي إذا لزم)
+GEMINI_API_KEY: Final = os.getenv('GEMINI_API_KEY')
 
 # حالات المحادثة
 PRICE = 1

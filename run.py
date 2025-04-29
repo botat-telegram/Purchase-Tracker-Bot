@@ -22,18 +22,25 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     ConversationHandler,
-    filters
+    filters,
+    CallbackQueryHandler
 )
 
+# إعداد مسار البحث أولاً
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+    
 # استيراد الوحدات المحلية
 try:
     from src.config import WELCOME_MESSAGE, PRICE, NOTES
     from handlers.conversation import handle_any_message, price, notes
     from handlers.commands import start, cancel, skip_command
+    from handlers.gemini_integration import gemini_callback_handler, GEMINI_CONFIRM, GEMINI_SELECT
 except ImportError as e:
-    # سيتم استيراد الوحدات لاحقاً بعد إضافة المجلد الرئيسي إلى مسار البحث
+    # طباعة الخطأ للتشخيص
     print(f"خطأ في الاستيراد: {e}")
-    pass
+    sys.exit(1)
 
 # إعداد السجلات
 logger = logging.getLogger(__name__)
@@ -191,10 +198,14 @@ def main() -> None:
         # إنشاء التطبيق
         application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
         
+        # تأكد من وجود معرفات Gemini
+        GEMINI_CONFIRM_STATE = GEMINI_CONFIRM
+        GEMINI_SELECT_STATE = GEMINI_SELECT
+        
         # إعداد المحادثة
         conv_handler = ConversationHandler(
             entry_points=[
-                CommandHandler('start', start_command if 'start_command' in globals() else start),
+                CommandHandler('start', start),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message),
             ],
             states={
@@ -209,6 +220,13 @@ def main() -> None:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, notes),
                     CommandHandler('s', skip_command),
                 ],
+                # إضافة حالات Gemini بشكل صريح
+                GEMINI_CONFIRM_STATE: [
+                    CallbackQueryHandler(gemini_callback_handler),
+                ],
+                GEMINI_SELECT_STATE: [
+                    CallbackQueryHandler(gemini_callback_handler),
+                ],
             },
             fallbacks=[CommandHandler('cancel', cancel)],
         )
@@ -216,13 +234,23 @@ def main() -> None:
         # إضافة معالج المحادثة
         application.add_handler(conv_handler)
         
+        # إضافة معالج للردود العامة
+        application.add_handler(CallbackQueryHandler(gemini_callback_handler))
+        
         # بدء البوت
         logger.info("جاري بدء البوت...")
         application.run_polling()
         
     except Exception as e:
         logger.error(f"خطأ: {str(e)}")
+        if "Conflict: terminated by other getUpdates request" in str(e):
+            logger.error("يبدو أن هناك نسخة أخرى من البوت قيد التشغيل. الرجاء إيقاف النسخة الأخرى قبل تشغيل نسخة جديدة.")
         sys.exit(1)
 
 if __name__ == '__main__':
-    main()
+    # تحقق ما إذا كان البوت يعمل بالفعل
+    if is_bot_running():
+        logger.error("البوت يعمل بالفعل. يرجى إيقاف النسخة الحالية قبل بدء نسخة جديدة.")
+        sys.exit(1)
+    else:
+        main()

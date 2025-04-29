@@ -19,6 +19,7 @@ from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound
 import traceback
 from functools import lru_cache
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 # إعداد التسجيل
 logger = logging.getLogger(__name__)
@@ -248,27 +249,54 @@ async def add_to_sheets(product: str, price: float, notes: str = "") -> bool:
         # إذا تم تحويل الوضع إلى تجريبي في get_worksheet
         if DEMO_MODE:
             return await add_to_sheets(product, price, notes)
-        
-        # إضافة البيانات - ترتيب الأعمدة كما في الجدول
+
+        # إضافة المنتج إلى ورقة العمل
         date = format_date(datetime.now())
         worksheet.append_row([date, product, price, notes])
-        logger.info(f"تمت إضافة المنتج: {product} بسعر {price}")
+        
+        logger.info(f"تمت إضافة المنتج: {product} بسعر {price} بتاريخ {date} مع ملاحظات: {notes}")
+        
         return True
         
-    except ValueError as e:
-        logger.error(f"خطأ في البيانات: {str(e)}")
-        raise
+    except Exception as e:
+        logger.error(f"خطأ في إضافة المنتج: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+async def add_product_to_sheet(chat_id, product: str, price, notes: str = "") -> bool:
+    """
+    إضافة منتج جديد إلى Google Sheets مع دعم معرف المحادثة
+    
+    المعطيات:
+        chat_id: معرف المحادثة (للتسجيل)
+        product (str): اسم المنتج
+        price: سعر المنتج (يمكن أن يكون نص أو رقم)
+        notes (str): ملاحظات إضافية (اختياري)
         
-    except SheetsError as e:
-        logger.error(str(e))
-        DEMO_MODE = True
-        return await add_to_sheets(product, price, notes)
+    تعيد:
+        bool: True إذا تمت الإضافة بنجاح، False إذا فشلت
+    """
+    try:
+        # محاولة تحويل السعر إلى رقم عشري
+        try:
+            price_float = float(price)
+        except (ValueError, TypeError):
+            logger.error(f"خطأ في تحويل السعر '{price}' إلى رقم")
+            return False
+            
+        # استدعاء الدالة الأساسية لإضافة المنتج
+        result = await add_to_sheets(product, price_float, notes)
+        
+        # تسجيل معلومات إضافية
+        if result:
+            logger.info(f"تمت إضافة المنتج من المستخدم {chat_id}: {product} بسعر {price_float}")
+        
+        return result
         
     except Exception as e:
-        logger.error(f"خطأ غير متوقع: {str(e)}")
+        logger.error(f"خطأ في add_product_to_sheet: {str(e)}")
         logger.error(traceback.format_exc())
-        DEMO_MODE = True
-        return await add_to_sheets(product, price, notes)
+        return False
 
 async def add_multiple_to_sheets(products: list) -> Tuple[int, list]:
     """
@@ -410,3 +438,6 @@ async def get_products(limit: int = 10) -> list:
         logger.error(f"خطأ في الحصول على المنتجات: {str(e)}")
         DEMO_MODE = True
         return await get_products(limit)
+
+load_dotenv()
+GOOGLE_SHEETS_KEY = os.getenv("GOOGLE_SHEETS_KEY")

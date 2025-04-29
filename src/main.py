@@ -18,7 +18,7 @@ import sys
 import atexit
 from pathlib import Path
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 
 from src.config import TOKEN, PRICE, NOTES, PRODUCT
 from handlers.commands import (
@@ -30,6 +30,8 @@ from handlers.commands import (
     handle_price,
     handle_notes,
 )
+from handlers.conversation import handle_any_message
+from handlers.gemini_integration import gemini_callback_handler, GEMINI_CONFIRM, GEMINI_SELECT
 
 # إعداد التسجيل
 logging.basicConfig(
@@ -113,6 +115,12 @@ def main() -> None:
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_notes),
                     CommandHandler('s', skip_command),
                 ],
+                GEMINI_CONFIRM: [
+                    CallbackQueryHandler(gemini_callback_handler),
+                ],
+                GEMINI_SELECT: [
+                    CallbackQueryHandler(gemini_callback_handler),
+                ],
             },
             fallbacks=[
                 CommandHandler('start', start_command),
@@ -126,6 +134,11 @@ def main() -> None:
         logger.info("جاري إضافة المعالجات...")
         app.add_handler(conv_handler)
         app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CallbackQueryHandler(gemini_callback_handler))
+        
+        # إضافة معالج للرسائل النصية العادية
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+        
         logger.info("تم إضافة المعالجات بنجاح")
         
         logger.info("جاري تشغيل البوت...")
