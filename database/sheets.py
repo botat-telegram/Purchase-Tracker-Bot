@@ -12,14 +12,15 @@ import os
 import json
 import logging
 import pickle
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound
+from gspread.exceptions import SpreadsheetNotFound, WorksheetNotFound, APIError
 import traceback
 from functools import lru_cache
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import time
 
 # إعداد التسجيل
 logger = logging.getLogger(__name__)
@@ -30,6 +31,11 @@ SPREADSHEET_NAME = "المشتريات"
 # حدود السعر
 MIN_PRICE = 0.01
 MAX_PRICE = 1000000
+
+# عدد محاولات إعادة الاتصال
+MAX_RETRIES = 3
+# فترة الانتظار بين المحاولات (بالثواني)
+RETRY_DELAY = 2
 
 # سنستخدم وضع تجريبي في حالة كان هناك مشكلة في الاتصال
 DEMO_MODE = False
@@ -79,10 +85,14 @@ def find_client_secret_file():
             return file
     return None
 
+# التخزين المؤقت للعميل مع التحقق من انتهاء صلاحية الجلسة
 @lru_cache(maxsize=1)
-def get_google_sheets_client() -> Tuple[gspread.Client, datetime]:
+def get_google_sheets_client() -> Tuple[Optional[gspread.Client], datetime]:
     """
     الحصول على عميل Google Sheets مع تخزين مؤقت
+    
+    Returns:
+        Tuple[Optional[gspread.Client], datetime]: (عميل جوجل شيتس، وقت الإنشاء)
     """
     global DEMO_MODE
     
@@ -128,9 +138,51 @@ def get_google_sheets_client() -> Tuple[gspread.Client, datetime]:
         DEMO_MODE = True
         return None, datetime.now()
 
-def get_worksheet() -> gspread.Worksheet:
+def with_retry(func):
+    """
+    مزخرف لإضافة إعادة المحاولة للدوال التي تتعامل مع Google Sheets API
+    
+    Args:
+        func: الدالة التي ستتم إعادة محاولة تنفيذها
+        
+    Returns:
+        نتيجة تنفيذ الدالة في حال النجاح
+        
+    Raises:
+        SheetsError: في حال فشل جميع المحاولات
+    """
+    async def wrapper(*args, **kwargs):
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                return await func(*args, **kwargs)
+            except (APIError, ConnectionError, TimeoutError) as e:
+                logger.warning(f"فشل الاتصال (محاولة {attempt+1}/{MAX_RETRIES}): {str(e)}")
+                last_error = e
+                # انتظار قبل إعادة المحاولة
+                time.sleep(RETRY_DELAY)
+                # إعادة تحميل العميل
+                get_google_sheets_client.cache_clear()
+            except Exception as e:
+                # الأخطاء الأخرى تُرفع مباشرة
+                logger.error(f"خطأ غير متوقع: {str(e)}")
+                raise
+        
+        # بعد فشل جميع المحاولات
+        error_msg = f"فشلت جميع محاولات الاتصال بـ Google Sheets ({MAX_RETRIES} محاولات)"
+        if last_error:
+            error_msg += f": {str(last_error)}"
+        logger.error(error_msg)
+        raise SheetsError(error_msg)
+        
+    return wrapper
+
+def get_worksheet() -> Optional[gspread.Worksheet]:
     """
     الحصول على ورقة العمل مع التعامل مع الأخطاء
+    
+    Returns:
+        Optional[gspread.Worksheet]: ورقة العمل أو None في حالة الوضع التجريبي
     """
     global DEMO_MODE
     
@@ -187,6 +239,13 @@ def get_worksheet() -> gspread.Worksheet:
 def validate_product_data(product: str, price: float) -> None:
     """
     التحقق من صحة بيانات المنتج
+    
+    Args:
+        product (str): اسم المنتج
+        price (float): سعر المنتج
+        
+    Raises:
+        ValueError: إذا كانت البيانات غير صالحة
     """
     if not product or not product.strip():
         raise ValueError("اسم المنتج لا يمكن أن يكون فارغاً")
@@ -200,20 +259,31 @@ def validate_product_data(product: str, price: float) -> None:
 def format_date(dt: datetime) -> str:
     """
     تنسيق التاريخ بالشكل المطلوب YYYY/MM/DD
+    
+    Args:
+        dt (datetime): كائن تاريخ
+    
+    Returns:
+        str: التاريخ بالتنسيق المطلوب
     """
     return dt.strftime("%Y/%m/%d")
 
+@with_retry
 async def add_to_sheets(product: str, price: float, notes: str = "") -> bool:
     """
     إضافة منتج جديد إلى Google Sheets
     
-    المعطيات:
+    Args:
         product (str): اسم المنتج
         price (float): سعر المنتج
         notes (str): ملاحظات إضافية (اختياري)
         
-    تعيد:
+    Returns:
         bool: True إذا تمت الإضافة بنجاح، False إذا فشلت
+        
+    Raises:
+        SheetsError: في حال فشل الاتصال بعد عدة محاولات
+        ValueError: في حال كانت البيانات غير صالحة
     """
     global DEMO_MODE
     
@@ -249,19 +319,28 @@ async def add_to_sheets(product: str, price: float, notes: str = "") -> bool:
         # إذا تم تحويل الوضع إلى تجريبي في get_worksheet
         if DEMO_MODE:
             return await add_to_sheets(product, price, notes)
-
-        # إضافة المنتج إلى ورقة العمل
+            
+        # إضافة المنتج إلى الجدول
         date = format_date(datetime.now())
-        worksheet.append_row([date, product, price, notes])
+        row = [date, product, price, notes]
+        worksheet.append_row(row)
         
         logger.info(f"تمت إضافة المنتج: {product} بسعر {price} بتاريخ {date} مع ملاحظات: {notes}")
-        
         return True
         
+    except ValueError as e:
+        # أخطاء التحقق من صحة البيانات
+        logger.error(f"بيانات غير صالحة: {str(e)}")
+        raise
     except Exception as e:
         logger.error(f"خطأ في إضافة المنتج: {str(e)}")
         logger.error(traceback.format_exc())
-        return False
+        if not DEMO_MODE:
+            logger.info("محاولة استخدام الوضع التجريبي...")
+            DEMO_MODE = True
+            return await add_to_sheets(product, price, notes)
+        else:
+            raise SheetsError(f"فشل في إضافة المنتج: {str(e)}")
 
 async def add_product_to_sheet(chat_id, product: str, price, notes: str = "") -> bool:
     """

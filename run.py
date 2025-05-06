@@ -38,7 +38,11 @@ if current_dir not in sys.path:
 try:
     from src.config import WELCOME_MESSAGE, PRICE, NOTES
     from handlers.conversation import handle_any_message, price, notes
-    from handlers.commands import start, cancel, skip_command
+    from handlers.commands import (
+        start, cancel, skip_command, help_command, 
+        last_products_command, handle_button_clicks,
+        handle_callback_query
+    )
     from handlers.gemini_integration import gemini_callback_handler, GEMINI_CONFIRM, GEMINI_SELECT
 except ImportError as e:
     # طباعة الخطأ للتشخيص
@@ -182,6 +186,12 @@ def main() -> None:
     setup_logging()
     logger.info("=== بدء تشغيل البوت ===")
     
+    # التحقق من عدم وجود نسخة أخرى من البوت
+    if is_bot_running():
+        logger.error("هناك نسخة أخرى من البوت قيد التشغيل! الخروج...")
+        print("هناك نسخة أخرى من البوت قيد التشغيل! الرجاء إغلاق النسخة السابقة قبل تشغيل نسخة جديدة.")
+        sys.exit(1)
+    
     try:
         # إعداد مسار البحث
         setup_python_path()
@@ -222,6 +232,7 @@ def main() -> None:
                 NOTES: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, notes),
                     CommandHandler('s', skip_command),
+                    CallbackQueryHandler(handle_callback_query),
                 ],
                 # إضافة حالات Gemini بشكل صريح
                 GEMINI_CONFIRM_STATE: [
@@ -237,6 +248,16 @@ def main() -> None:
         # إضافة معالج المحادثة
         application.add_handler(conv_handler)
         
+        # إضافة معالجات للأوامر
+        application.add_handler(CommandHandler('help', help_command))
+        application.add_handler(CommandHandler('last', last_products_command))
+        
+        # إضافة معالج للأزرار
+        button_handler = MessageHandler(
+            filters.TEXT & ~filters.COMMAND, handle_button_clicks
+        )
+        application.add_handler(button_handler)
+        
         # إضافة معالج للردود العامة
         application.add_handler(CallbackQueryHandler(gemini_callback_handler))
         
@@ -248,12 +269,6 @@ def main() -> None:
         logger.error(f"خطأ: {str(e)}")
         if "Conflict: terminated by other getUpdates request" in str(e):
             logger.error("يبدو أن هناك نسخة أخرى من البوت قيد التشغيل. الرجاء إيقاف النسخة الأخرى قبل تشغيل نسخة جديدة.")
-        sys.exit(1)
-
-if __name__ == '__main__':
-    # تحقق ما إذا كان البوت يعمل بالفعل
-    if is_bot_running():
-        logger.error("البوت يعمل بالفعل. يرجى إيقاف النسخة الحالية قبل بدء نسخة جديدة.")
-        sys.exit(1)
-    else:
-        main()
+        
+if __name__ == "__main__":
+    main()

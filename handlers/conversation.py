@@ -5,9 +5,10 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
 from src.config import WELCOME_MESSAGE as welcome_message, PRICE, NOTES
-from utils.number_converter import convert_to_english_numbers
+from utils.number_converter import convert_to_english_numbers, extract_price_from_text
 from database.sheets import add_to_sheets, add_multiple_to_sheets, SheetsError
 import traceback
+import re
 from handlers.gemini_integration import handle_unstructured_message, GEMINI_CONFIRM, GEMINI_SELECT
 
 # إعداد التسجيل
@@ -17,7 +18,22 @@ logger = logging.getLogger(__name__)
 SKIP_NOTES_WORDS = [".", "لا", "-", "/s", "s", "لأ"]
 
 def parse_product_line(line: str) -> tuple:
-    """تحليل سطر منتج واحد"""
+    """
+    تحليل سطر منتج واحد
+    
+    يدعم الأنماط التالية:
+    1. منتج سعر - مثال: كولا 23
+    2. سعر منتج - مثال: 23 كولا
+    3. منتج سعر ملاحظات - مثال: كولا 23 بارد
+    4. منتج بدون سعر - مثال: كولا
+    5. التعامل مع العملات - مثال: كولا 23 ريال
+    
+    Args:
+        line (str): سطر المنتج للتحليل
+        
+    Returns:
+        tuple: (المنتج، السعر، الملاحظات) أو None في حالة الفشل
+    """
     try:
         # تنظيف النص من المسافات الزائدة
         line = ' '.join(line.split())
@@ -27,12 +43,17 @@ def parse_product_line(line: str) -> tuple:
         if not line:
             return None
             
-        # تقسيم النص إلى كلمات
-        parts = line.split()
-        if len(parts) < 1:  
-            return None
+        # استخراج جميع الأرقام من النص
+        price_matches = re.findall(r'\b\d+(?:\.\d+)?\b', line)
+        
+        # إذا لم نجد أرقام، قد يكون منتج بدون سعر
+        if not price_matches:
+            return line.strip(), None, ""
             
-        # البحث عن السعر (أول رقم نجده)
+        # نحاول البحث عن النمط الشائع: منتج سعر ملاحظات
+        parts = line.split()
+        
+        # تحديد موقع الرقم (السعر)
         price_index = -1
         for i, part in enumerate(parts):
             try:
@@ -41,24 +62,64 @@ def parse_product_line(line: str) -> tuple:
                 break
             except ValueError:
                 continue
-                
-        # إذا لم يتم العثور على سعر
-        if price_index == -1:
-            return " ".join(parts), None, ""
-            
-        # كل ما بعد السعر يعتبر ملاحظات
-        product = " ".join(parts[:price_index])
-        price = float(parts[price_index])
-        notes = " ".join(parts[price_index + 1:])
         
-        # التحقق من أن المنتج غير فارغ
-        if not product.strip():
-            return None
+        # إذا وجدنا رقم (نمط: منتج سعر ملاحظات)
+        if price_index > 0:
+            product = " ".join(parts[:price_index])
+            price = float(parts[price_index])
+            notes = " ".join(parts[price_index + 1:])
+            return product.strip(), price, notes.strip()
+            
+        # قد يكون النمط: سعر منتج
+        elif price_index == 0:
+            price = float(parts[0])
+            product = " ".join(parts[1:])
+            
+            # قد يكون جزء من الاسم هو ملاحظات
+            # نفترض أن أول 3 كلمات هي المنتج، وما بعدها ملاحظات
+            product_parts = product.split()
+            if len(product_parts) > 3:
+                product = " ".join(product_parts[:3])
+                notes = " ".join(product_parts[3:])
+                return product.strip(), price, notes.strip()
+            
+            return product.strip(), price, ""
+        
+        # إذا كان النص لا يتبع النمط المعتاد
+        # نحاول استخراج أول رقم واعتباره السعر
+        price = float(price_matches[0])
+        
+        # نحذف الرقم والعملات من النص ونعتبر الباقي اسم المنتج
+        text_without_price = line
+        for match in price_matches:
+            text_without_price = text_without_price.replace(match, " ")
+        
+        # إزالة أي كلمات عملة تم تركها (مثل "ريال" أو "دولار")
+        currencies = ["ريال", "دولار", "جنيه", "درهم", "يورو", "رس", "r.s", "rs", "ر.س", "ر.س."]
+        for currency in currencies:
+            text_without_price = re.sub(r'\b' + re.escape(currency) + r'\b', " ", text_without_price, flags=re.IGNORECASE)
+        
+        # تنظيف النص النهائي
+        text_without_price = ' '.join(text_without_price.split())
+        
+        # الآن يمكننا تقسيم النص إلى منتج وملاحظات
+        product_parts = text_without_price.split()
+        if not product_parts:
+            return "منتج بدون اسم", price, ""
+        
+        # نفترض أن أول 3 كلمات هي المنتج، وما بعدها ملاحظات
+        if len(product_parts) > 3:
+            product = " ".join(product_parts[:3])
+            notes = " ".join(product_parts[3:])
+        else:
+            product = text_without_price
+            notes = ""
             
         return product.strip(), price, notes.strip()
 
     except Exception as e:
         logger.error(f"خطأ في تحليل السطر {line}: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -76,7 +137,12 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         should_use_gemini_directly = True
         logger.info("استخدام Gemini مباشرة: أكثر من 3 أسطر")
     
-    # الشرط 2: تحقق من تنسيق غير معتاد (أرقام في الملاحظات، السعر قبل المنتج، إلخ)
+    # الشرط 2: تحقق من طول النص (قد يكون وصف طويل)
+    if not should_use_gemini_directly and len(text) > 100:
+        should_use_gemini_directly = True
+        logger.info("استخدام Gemini مباشرة: النص طويل")
+    
+    # الشرط 3: تحقق من تنسيق غير معتاد
     if not should_use_gemini_directly:
         for line in lines:
             line = line.strip()
@@ -88,21 +154,15 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             # تحقق من وجود أرقام متعددة في السطر (قد يشير إلى وجود رقم في الملاحظات)
             numbers_count = sum(1 for part in converted_line.split() if any(char.isdigit() for char in part))
-            if numbers_count > 1:
+            if numbers_count > 2:  # تغيير من 1 إلى 2 للسماح بأنماط أكثر مرونة
                 should_use_gemini_directly = True
                 logger.info(f"استخدام Gemini مباشرة: وجود أرقام متعددة في السطر: '{line}'")
                 break
-            
-            # تحقق مما إذا كان السطر يبدأ برقم (قد يعني أن السعر قبل المنتج)
-            if converted_line and any(char.isdigit() for char in converted_line.split()[0]):
-                should_use_gemini_directly = True
-                logger.info(f"استخدام Gemini مباشرة: السطر يبدأ برقم: '{line}'")
-                break
-            
+                
             # تجربة تحليل السطر التقليدي
             result = parse_product_line(line)
-            if not result or result[1] is None:
-                # إذا فشل التحليل التقليدي
+            if not result:
+                # إذا فشل التحليل تماماً
                 should_use_gemini_directly = True
                 logger.info(f"استخدام Gemini مباشرة: فشل التحليل التقليدي للسطر: '{line}'")
                 break
@@ -155,6 +215,7 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                         message += f"\n\nتم تجاهل {len(errors)} سطر:\n" + "\n".join(errors)
                     
                     await update.message.reply_text(message)
+                    await update.message.reply_text(welcome_message)
                     return ConversationHandler.END
                 else:
                     message = "لم تتم إضافة أي منتجات."
@@ -168,8 +229,8 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logger.error(f"خطأ في إضافة المنتجات: {str(e)}")
                 await update.message.reply_text(f"حدث خطأ أثناء إضافة المنتجات: {str(e)}")
         
-        # إذا لم نتمكن من معالجة أي من الأسطر، نستخدم Gemini
-        if errors or len(products_to_add) == 0:
+        # إذا لم نتمكن من معالجة جميع الأسطر، نستخدم Gemini
+        if errors:
             try:
                 # تخزين المنتجات التي تم إضافتها بنجاح
                 if 'successful_products' not in context.user_data:
@@ -199,32 +260,55 @@ async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     await update.message.reply_text(f"تم إضافة {product} بسعر {price} مع ملاحظة: {notes}")
                 else:
                     await update.message.reply_text(f"تم إضافة {product} بسعر {price}")
+                    
+                # إرسال رسالة ترحيب بعد الإضافة
+                await update.message.reply_text(welcome_message)
                 return ConversationHandler.END
-            except Exception as e:
+            except SheetsError as e:
                 logger.error(f"خطأ في إضافة المنتج: {str(e)}")
-                await update.message.reply_text(f"خطأ في إضافة المنتج: {str(e)}")
-        
-        # إذا لم ننجح في تحليل النص، نجرب الذكاء الاصطناعي Gemini
-        try:
-            logger.info("إرسال النص إلى Gemini بعد فشل التحليل التقليدي (سطر واحد)")
-            result = await handle_unstructured_message(update, context)
-            return result
-        except Exception as e:
-            logger.error(f"خطأ في استدعاء Gemini: {str(e)}")
-            await update.message.reply_text(f"حدث خطأ أثناء تحليل الرسالة: {str(e)}")
-            return ConversationHandler.END
+                await update.message.reply_text(f"خطأ في الاتصال بقاعدة البيانات: {str(e)}")
+            except ValueError as e:
+                logger.error(f"خطأ في بيانات المنتج: {str(e)}")
+                await update.message.reply_text(f"خطأ في بيانات المنتج: {str(e)}")
+            except Exception as e:
+                logger.error(f"خطأ غير متوقع: {str(e)}")
+                await update.message.reply_text(f"حدث خطأ غير متوقع: {str(e)}")
+        elif result and result[1] is None:  # إذا وجدنا منتج بدون سعر
+            # حفظ المنتج وانتقل إلى مرحلة إدخال السعر
+            context.user_data['product'] = result[0]
+            await update.message.reply_text(f"أدخل سعر المنتج {result[0]}:")
+            return PRICE
+        else:
+            # إذا لم ننجح في تحليل النص، نجرب الذكاء الاصطناعي Gemini
+            try:
+                logger.info("إرسال النص إلى Gemini بعد فشل التحليل التقليدي (سطر واحد)")
+                result = await handle_unstructured_message(update, context)
+                return result
+            except Exception as e:
+                logger.error(f"خطأ في استدعاء Gemini: {str(e)}")
+                await update.message.reply_text(f"حدث خطأ أثناء تحليل الرسالة: {str(e)}")
+                return ConversationHandler.END
 
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """معالج إدخال السعر"""
     try:
-        price = float(update.message.text)
-        if price <= 0:
+        # تحويل النص إلى أرقام إنجليزية
+        text = convert_to_english_numbers(update.message.text.strip())
+        
+        # استخراج السعر
+        price_value = extract_price_from_text(text)
+        
+        if price_value is None:
+            await update.message.reply_text("لم أتمكن من فهم السعر. الرجاء إدخال رقم صحيح:")
+            return PRICE
+            
+        if price_value <= 0:
             await update.message.reply_text("السعر يجب أن يكون أكبر من صفر. الرجاء إدخال السعر مرة أخرى:")
             return PRICE
             
-        context.user_data['price'] = price
+        context.user_data['price'] = price_value
         await update.message.reply_text(
-            f"تم استلام السعر: {price}\n"
+            f"تم استلام السعر: {price_value}\n"
             "هل تريد إضافة ملاحظة؟\n"
             "يمكنك تخطي الملاحظات عن طريق:\n"
             "- إرسال '.' (نقطة)\n"
@@ -251,27 +335,32 @@ async def notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not context.user_data:  # إذا تم مسح البيانات بواسطة skip
         return ConversationHandler.END
         
-    text = update.message.text
+    notes = update.message.text
     
     # تخطي الملاحظات إذا كانت من كلمات التخطي
-    if text.strip().lower() in SKIP_NOTES_WORDS:
-        text = ''
+    if notes.strip().lower() in SKIP_NOTES_WORDS:
+        notes = ''
+    
+    product = context.user_data['product']
+    price = context.user_data['price']
     
     try:
-        product = context.user_data['product']
-        price = context.user_data['price']
-        await add_to_sheets(product, price, text)
-        
-        if text:
-            await update.message.reply_text(f"تم إضافة {product} بسعر {price} مع ملاحظة: {text}")
+        await add_to_sheets(product, price, notes)
+        if notes:
+            await update.message.reply_text(f"تم إضافة {product} بسعر {price} مع ملاحظة: {notes}")
         else:
             await update.message.reply_text(f"تم إضافة {product} بسعر {price}")
         
         # مسح بيانات المستخدم
         context.user_data.clear()
         
-        await update.message.reply_text(WELCOME_MESSAGE)
+        await update.message.reply_text(welcome_message)
         return ConversationHandler.END
+    except SheetsError as e:
+        await update.message.reply_text(f"خطأ في الاتصال بقاعدة البيانات: {str(e)}")
+    except ValueError as e:
+        await update.message.reply_text(f"خطأ في بيانات المنتج: {str(e)}")
     except Exception as e:
-        await update.message.reply_text(f"حدث خطأ: {str(e)}")
-        return ConversationHandler.END
+        await update.message.reply_text(f"حدث خطأ غير متوقع: {str(e)}")
+    
+    return ConversationHandler.END

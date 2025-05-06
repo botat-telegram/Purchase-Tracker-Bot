@@ -7,9 +7,11 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, CallbackQueryHandler
 from utils.gemini import analyze_products_with_gemini, GeminiAPIError, DEFAULT_NOTES_KEYWORDS
-from database.sheets import add_product_to_sheet
+from database.sheets import add_product_to_sheet, add_multiple_to_sheets
 from src.config import GEMINI_API_KEY, WELCOME_MESSAGE
 import json
+import re
+from utils.number_converter import convert_to_english_numbers, extract_price_from_text
 
 # إعداد التسجيل
 logger = logging.getLogger(__name__)
@@ -17,6 +19,74 @@ logger = logging.getLogger(__name__)
 # حالات المحادثة
 GEMINI_CONFIRM = 1000
 GEMINI_SELECT = 1001
+
+# ضبط استخدام Gemini
+USE_GEMINI = True if GEMINI_API_KEY else False
+
+async def analyze_text_locally(text: str) -> list:
+    """
+    تحليل النص محلياً بدون استخدام Gemini
+    
+    Args:
+        text (str): النص المراد تحليله
+        
+    Returns:
+        list: قائمة بالمنتجات المستخرجة
+    """
+    products = []
+    
+    # تقسيم النص إلى أسطر
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    
+    for line in lines:
+        try:
+            # تحويل الأرقام العربية
+            clean_line = convert_to_english_numbers(line)
+            
+            # البحث عن رقم في النص (السعر)
+            price = extract_price_from_text(clean_line)
+            
+            if price is None:
+                # إذا لم نجد سعر، نتجاهل هذا السطر
+                continue
+            
+            # استخراج الرقم والعملات من النص
+            price_pattern = r'\b\d+(?:\.\d+)?\b'
+            prices = re.findall(price_pattern, clean_line)
+            
+            # استبدال الرقم والعملات بمساحة فارغة
+            for p in prices:
+                clean_line = clean_line.replace(p, ' ')
+                
+            # حذف كلمات العملات المعروفة
+            currencies = ["ريال", "دولار", "جنيه", "درهم", "يورو", "رس", "r.s", "rs", "ر.س", "ر.س."]
+            for currency in currencies:
+                clean_line = re.sub(r'\b' + re.escape(currency) + r'\b', ' ', clean_line, flags=re.IGNORECASE)
+            
+            # تنظيف النص النهائي
+            product_text = ' '.join(clean_line.split())
+            
+            # العثور على الملاحظات (كل شيء بعد الكلمة الثالثة)
+            parts = product_text.split()
+            
+            if len(parts) > 3:
+                product_name = ' '.join(parts[:3])
+                notes = ' '.join(parts[3:])
+            else:
+                product_name = product_text
+                notes = ''
+                
+            # تأكد من أن الاسم غير فارغ
+            if product_name.strip():
+                products.append({
+                    'product': product_name.strip(),
+                    'price': price,
+                    'notes': notes.strip()
+                })
+        except Exception as e:
+            logger.error(f"خطأ في تحليل السطر '{line}': {str(e)}")
+    
+    return products
 
 async def handle_unstructured_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text=None) -> int:
     """
@@ -37,93 +107,88 @@ async def handle_unstructured_message(update: Update, context: ContextTypes.DEFA
     # تقسيم الرسالة إلى أسطر متعددة وإزالة الأسطر الفارغة
     lines = [line.strip() for line in message_text.split('\n') if line.strip()]
     
-    if len(lines) == 1:
-        # إذا كان هناك سطر واحد فقط، قم بتحليله باستخدام Gemini
-        try:
+    # تحديد ما إذا كان سيتم استخدام Gemini أو التحليل المحلي
+    use_gemini = USE_GEMINI and GEMINI_API_KEY
+    
+    try:
+        # تحليل النص
+        if use_gemini:
+            logger.info("استخدام Gemini لتحليل النص")
             products = await analyze_products_with_gemini(message_text)
-            if not products:
-                await update.message.reply_text("لم أتمكن من تحليل رسالتك. يرجى المحاولة مرة أخرى بصيغة مختلفة.")
-                return ConversationHandler.END
-                
-            # حفظ المنتجات في سياق المستخدم
-            context.user_data['gemini_products'] = products
-            
-            # عرض المنتجات التي تم تحليلها للمستخدم
-            message = "🔎 لقد حللت رسالتك وحددت المنتجات التالية:\n\n"
-            for i, product in enumerate(products, 1):
-                product_name = product.get('product', 'غير معروف')
-                price = product.get('price', 'غير معروف')
-                notes = product.get('notes', '')
-                notes_text = f" - ملاحظات: {notes}" if notes else ""
-                message += f"{i}. {product_name} - السعر: {price}{notes_text}\n"
-            
-            message += "\nهل تريد إضافة هذه المنتجات إلى الجدول؟"
-            
-            # إنشاء أزرار التأكيد
-            keyboard = [
-                [InlineKeyboardButton("✅ تأكيد الكل", callback_data="gemini_confirm_all")],
-                [InlineKeyboardButton("🔀 اختيار منتجات محددة", callback_data="gemini_select_products")],
-                [InlineKeyboardButton("❌ إلغاء", callback_data="gemini_cancel")]
-            ]
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(message, reply_markup=reply_markup)
-            
-            return GEMINI_CONFIRM
-            
-        except GeminiAPIError as e:
-            await update.message.reply_text(f"حدث خطأ أثناء تحليل رسالتك: {str(e)}")
+        else:
+            logger.info("استخدام التحليل المحلي")
+            products = await analyze_text_locally(message_text)
+        
+        if not products:
+            await update.message.reply_text("لم أتمكن من تحليل رسالتك. يرجى المحاولة مرة أخرى بصيغة مختلفة.")
             return ConversationHandler.END
-    else:
-        # إذا كان هناك عدة أسطر، قم بتحليلها كل سطر على حدة أو كمجموعة
-        all_products = []
+            
+        # حفظ المنتجات في سياق المستخدم
+        context.user_data['gemini_products'] = products
+        
+        # عرض المنتجات التي تم تحليلها للمستخدم
+        message = "🔎 لقد حللت رسالتك وحددت المنتجات التالية:\n\n"
+        for i, product in enumerate(products, 1):
+            product_name = product.get('product', 'غير معروف')
+            price = product.get('price', 'غير معروف')
+            notes = product.get('notes', '')
+            notes_text = f" - ملاحظات: {notes}" if notes else ""
+            message += f"{i}. {product_name} - السعر: {price}{notes_text}\n"
+        
+        message += "\nهل تريد إضافة هذه المنتجات إلى الجدول؟"
+        
+        # إنشاء أزرار التأكيد
+        keyboard = [
+            [InlineKeyboardButton("✅ تأكيد الكل", callback_data="gemini_confirm_all")],
+            [InlineKeyboardButton("🔀 اختيار منتجات محددة", callback_data="gemini_select_products")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="gemini_cancel")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(message, reply_markup=reply_markup)
+        
+        return GEMINI_CONFIRM
+    except GeminiAPIError as e:
+        logger.error(f"خطأ في Gemini API: {str(e)}")
+        # محاولة التحليل المحلي في حال فشل Gemini
         try:
-            # أولاً، جرب التحليل كنص كامل
-            products = await analyze_products_with_gemini(message_text)
+            logger.info("محاولة التحليل المحلي بعد فشل Gemini")
+            products = await analyze_text_locally(message_text)
+            
             if products:
-                all_products = products
+                context.user_data['gemini_products'] = products
+                
+                message = "🔍 تم تحليل رسالتك محلياً وحددت المنتجات التالية:\n\n"
+                for i, product in enumerate(products, 1):
+                    product_name = product.get('product', 'غير معروف')
+                    price = product.get('price', 'غير معروف')
+                    notes = product.get('notes', '')
+                    notes_text = f" - ملاحظات: {notes}" if notes else ""
+                    message += f"{i}. {product_name} - السعر: {price}{notes_text}\n"
+                
+                message += "\nهل تريد إضافة هذه المنتجات إلى الجدول؟"
+                
+                keyboard = [
+                    [InlineKeyboardButton("✅ تأكيد الكل", callback_data="gemini_confirm_all")],
+                    [InlineKeyboardButton("🔀 اختيار منتجات محددة", callback_data="gemini_select_products")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="gemini_cancel")]
+                ]
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(message, reply_markup=reply_markup)
+                
+                return GEMINI_CONFIRM
             else:
-                # إذا فشل ذلك، قم بتحليل كل سطر بشكل منفصل
-                for line in lines:
-                    if not line.strip():
-                        continue
-                    products_in_line = await analyze_products_with_gemini(line)
-                    if products_in_line:
-                        all_products.extend(products_in_line)
-                        
-            if not all_products:
                 await update.message.reply_text("لم أتمكن من تحليل رسالتك. يرجى المحاولة مرة أخرى بصيغة مختلفة.")
                 return ConversationHandler.END
-                
-            # حفظ المنتجات في سياق المستخدم
-            context.user_data['gemini_products'] = all_products
-            
-            # عرض المنتجات التي تم تحليلها للمستخدم
-            message = "🔎 لقد حللت رسالتك وحددت المنتجات التالية:\n\n"
-            for i, product in enumerate(all_products, 1):
-                product_name = product.get('product', 'غير معروف')
-                price = product.get('price', 'غير معروف')
-                notes = product.get('notes', '')
-                notes_text = f" - ملاحظات: {notes}" if notes else ""
-                message += f"{i}. {product_name} - السعر: {price}{notes_text}\n"
-            
-            message += "\nهل تريد إضافة هذه المنتجات إلى الجدول؟"
-            
-            # إنشاء أزرار التأكيد
-            keyboard = [
-                [InlineKeyboardButton("✅ تأكيد الكل", callback_data="gemini_confirm_all")],
-                [InlineKeyboardButton("🔀 اختيار منتجات محددة", callback_data="gemini_select_products")],
-                [InlineKeyboardButton("❌ إلغاء", callback_data="gemini_cancel")]
-            ]
-            
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(message, reply_markup=reply_markup)
-            
-            return GEMINI_CONFIRM
-            
-        except GeminiAPIError as e:
-            await update.message.reply_text(f"حدث خطأ أثناء تحليل رسالتك: {str(e)}")
+        except Exception as e2:
+            logger.error(f"فشل التحليل المحلي أيضاً: {str(e2)}")
+            await update.message.reply_text(f"حدث خطأ أثناء تحليل رسالتك: {str(e)}. والتحليل المحلي فشل أيضاً.")
             return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"خطأ عام: {str(e)}")
+        await update.message.reply_text(f"حدث خطأ أثناء تحليل رسالتك: {str(e)}")
+        return ConversationHandler.END
 
 async def gemini_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
@@ -140,17 +205,34 @@ async def gemini_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             return ConversationHandler.END
         
         try:
-            # إضافة المنتجات إلى الجدول
+            # إعداد قائمة المنتجات للإضافة دفعة واحدة
+            products_list = []
             for product in products:
-                await add_product_to_sheet(
-                    query.message.chat_id,
-                    product.get('product', ''),
-                    product.get('price', ''),
-                    product.get('notes', '')
-                )
+                product_name = product.get('product', '')
+                price = product.get('price', '')
+                notes = product.get('notes', '')
+                try:
+                    # تحويل السعر إلى رقم
+                    price_float = float(price)
+                    products_list.append((product_name, price_float, notes))
+                except (ValueError, TypeError):
+                    logger.error(f"خطأ في تحويل السعر '{price}' إلى رقم")
+                    continue
             
-            # تحديث الرسالة مع تأكيد الإضافة
-            await query.message.edit_text(f"✅ تمت إضافة {len(products)} منتج(ات) إلى الجدول بنجاح.")
+            # إضافة المنتجات دفعة واحدة
+            if products_list:
+                success_count, errors = await add_multiple_to_sheets(products_list)
+                
+                # تحديث الرسالة مع تأكيد الإضافة
+                if errors:
+                    error_msg = "\n".join(errors[:3])
+                    if len(errors) > 3:
+                        error_msg += f"\n... و {len(errors) - 3} أخطاء أخرى"
+                    await query.message.edit_text(f"✅ تمت إضافة {success_count} منتج(ات) إلى الجدول بنجاح.\n⚠️ مع بعض الأخطاء:\n{error_msg}")
+                else:
+                    await query.message.edit_text(f"✅ تمت إضافة {success_count} منتج(ات) إلى الجدول بنجاح.")
+            else:
+                await query.message.edit_text("لم يتم إضافة أي منتجات. تحقق من صحة بيانات المنتجات.")
             
             return ConversationHandler.END
             
@@ -284,17 +366,34 @@ async def handle_selected_products_confirmation(update: Update, context: Context
     selected_products = [all_products[i] for i in selected_indices if i < len(all_products)]
     
     try:
-        # إضافة المنتجات المختارة إلى الجدول
+        # إعداد قائمة المنتجات للإضافة دفعة واحدة
+        products_list = []
         for product in selected_products:
-            await add_product_to_sheet(
-                query.message.chat_id,
-                product.get('product', ''),
-                product.get('price', ''),
-                product.get('notes', '')
-            )
+            product_name = product.get('product', '')
+            price = product.get('price', '')
+            notes = product.get('notes', '')
+            try:
+                # تحويل السعر إلى رقم
+                price_float = float(price)
+                products_list.append((product_name, price_float, notes))
+            except (ValueError, TypeError):
+                logger.error(f"خطأ في تحويل السعر '{price}' إلى رقم")
+                continue
         
-        # تحديث الرسالة مع تأكيد الإضافة
-        await query.message.edit_text(f"✅ تمت إضافة {len(selected_products)} منتج(ات) مختار(ة) إلى الجدول بنجاح.")
+        # إضافة المنتجات دفعة واحدة
+        if products_list:
+            success_count, errors = await add_multiple_to_sheets(products_list)
+            
+            # تحديث الرسالة مع تأكيد الإضافة
+            if errors:
+                error_msg = "\n".join(errors[:3])
+                if len(errors) > 3:
+                    error_msg += f"\n... و {len(errors) - 3} أخطاء أخرى"
+                await query.message.edit_text(f"✅ تمت إضافة {success_count} منتج(ات) مختار(ة) إلى الجدول بنجاح.\n⚠️ مع بعض الأخطاء:\n{error_msg}")
+            else:
+                await query.message.edit_text(f"✅ تمت إضافة {success_count} منتج(ات) مختار(ة) إلى الجدول بنجاح.")
+        else:
+            await query.message.edit_text("لم يتم إضافة أي منتجات. تحقق من صحة بيانات المنتجات المختارة.")
         
         return ConversationHandler.END
         
