@@ -16,6 +16,7 @@ GOOGLE_SHEETS_KEY: Final = os.getenv('GOOGLE_SHEETS_KEY')
 GEMINI_API_KEY: Final = os.getenv('GEMINI_API_KEY')
 
 # حالات المحادثة
+PRODUCT = 0
 PRICE = 1
 NOTES = 2
 

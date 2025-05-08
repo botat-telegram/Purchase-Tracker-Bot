@@ -1,4 +1,9 @@
+import sys
+import os
 import asyncio
+
+# إضافة المسار الجذري للمشروع إلى sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from utils.gemini import analyze_products_with_gemini
 
 async def main():

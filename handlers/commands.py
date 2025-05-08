@@ -6,6 +6,7 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.ext import ContextTypes, ConversationHandler
 from src.config import WELCOME_MESSAGE as welcome_message
 from database.sheets import add_to_sheets, get_products
+from datetime import datetime
 
 # إعداد التسجيل
 logger = logging.getLogger(__name__)
@@ -20,8 +21,7 @@ NOTES = 2
 
 # لوحة المفاتيح الرئيسية
 MAIN_KEYBOARD = [
-    ["📝 إضافة منتج جديد"],
-    ["📋 آخر المنتجات", "❓ مساعدة"]
+    ["❌ إلغاء العملية"]
 ]
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -185,21 +185,17 @@ async def handle_button_clicks(update: Update, context: ContextTypes.DEFAULT_TYP
     """معالج النقر على الأزرار في لوحة المفاتيح"""
     text = update.message.text
     
-    if text == "📝 إضافة منتج جديد":
-        await update.message.reply_text("أدخل اسم المنتج أو اكتب المنتج مع السعر مباشرة:")
-        return PRODUCT
-        
-    elif text == "📋 آخر المنتجات":
-        await last_products_command(update, context)
-        return ConversationHandler.END
-        
-    elif text == "❓ مساعدة":
-        await help_command(update, context)
-        return ConversationHandler.END
-        
-    else:
-        # معالجة النص كمدخلات منتج عادية
-        return None
+    # قائمة الأزرار المعروفة
+    KNOWN_BUTTONS = ["❌ إلغاء العملية"]
+    
+    # التحقق أن النص هو زر معروف
+    if text in KNOWN_BUTTONS:
+        if text == "❌ إلغاء العملية":
+            await cancel(update, context)
+            return ConversationHandler.END
+    
+    # إذا لم يكن النص زراً معروفاً، نعيد None
+    return None
 
 async def handle_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """معالج إدخال اسم المنتج"""
@@ -317,3 +313,87 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 return ConversationHandler.END
     
     return NOTES
+
+async def today_products_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض المنتجات المسجلة اليوم"""
+    try:
+        # الحصول على المنتجات من قاعدة البيانات
+        products = await get_products()
+        
+        # تصفية المنتجات المسجلة اليوم
+        today = datetime.now().strftime("%Y/%m/%d")
+        today_products = [
+            p for p in products 
+            if p.get('date', '').startswith(today)
+        ]
+        
+        if not today_products:
+            await update.message.reply_text("لا توجد منتجات مسجلة اليوم.")
+            return
+            
+        # تنسيق الرسالة
+        message = "📊 المنتجات المسجلة اليوم:\n\n"
+        total = 0
+        
+        for product in today_products:
+            product_name = product.get('name') or product.get('product', 'غير معروف')
+            price = product.get('price', 0)
+            notes = product.get('notes', '')
+            
+            message += f"• {product_name} - {price}"
+            if notes:
+                message += f" ({notes})"
+            message += "\n"
+            total += float(price)
+            
+        message += f"\n💰 المجموع: {total}"
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        logger.error(f"خطأ في عرض منتجات اليوم: {str(e)}")
+        await update.message.reply_text("حدث خطأ أثناء جلب المنتجات. الرجاء المحاولة مرة أخرى.")
+
+async def last_ten_operations_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """عرض آخر 10 عمليات"""
+    try:
+        # الحصول على المنتجات من قاعدة البيانات
+        products = await get_products(10)
+        
+        if not products:
+            await update.message.reply_text("لا توجد عمليات مسجلة.")
+            return
+        
+        # ترتيب المنتجات حسب التاريخ تنازلياً إذا أمكن
+        try:
+            sorted_products = sorted(
+                products,
+                key=lambda x: x.get('date', ''),
+                reverse=True
+            )
+        except Exception:
+            sorted_products = products
+        
+        # تنسيق الرسالة
+        message = "🔄 آخر 10 عمليات:\n\n"
+        for i, product in enumerate(sorted_products, 1):
+            date = product.get('date', 'غير معروف')
+            name = product.get('name') or product.get('product', 'غير معروف')
+            price = product.get('price', 'غير معروف')
+            notes = product.get('notes', '')
+            message += f"{i}. {name} - {price}"
+            if notes:
+                message += f" ({notes})"
+            message += f" ({date})\n"
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"خطأ في عرض آخر العمليات: {str(e)}")
+        await update.message.reply_text("حدث خطأ أثناء جلب العمليات. الرجاء المحاولة مرة أخرى.")
+
+async def last_ten_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /last10 لعرض آخر 10 عمليات"""
+    await last_ten_operations_command(update, context)
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """معالج أمر /today لعرض المنتجات المسجلة اليوم"""
+    await today_products_command(update, context)

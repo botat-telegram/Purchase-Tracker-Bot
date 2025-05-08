@@ -41,7 +41,7 @@ try:
     from handlers.commands import (
         start, cancel, skip_command, help_command, 
         last_products_command, handle_button_clicks,
-        handle_callback_query
+        handle_callback_query, last_ten_command, today_command
     )
     from handlers.gemini_integration import gemini_callback_handler, GEMINI_CONFIRM, GEMINI_SELECT
 except ImportError as e:
@@ -223,13 +223,16 @@ def main() -> None:
             ],
             states={
                 PRODUCT: [
+                    MessageHandler(filters.TEXT & filters.Regex(r'^❌ إلغاء العملية$'), cancel),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message),
                 ],
                 PRICE: [
+                    MessageHandler(filters.TEXT & filters.Regex(r'^❌ إلغاء العملية$'), cancel),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, price),
                     CommandHandler('s', skip_command),
                 ],
                 NOTES: [
+                    MessageHandler(filters.TEXT & filters.Regex(r'^❌ إلغاء العملية$'), cancel),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, notes),
                     CommandHandler('s', skip_command),
                     CallbackQueryHandler(handle_callback_query),
@@ -245,20 +248,26 @@ def main() -> None:
             fallbacks=[CommandHandler('cancel', cancel)],
         )
         
-        # إضافة معالج المحادثة
-        application.add_handler(conv_handler)
-        
-        # إضافة معالجات للأوامر
+        # إضافة المعالجات بترتيب مناسب
+        # أولاً: معالجات الأوامر
         application.add_handler(CommandHandler('help', help_command))
         application.add_handler(CommandHandler('last', last_products_command))
-        
-        # إضافة معالج للأزرار
+        application.add_handler(CommandHandler('last10', last_ten_command))
+        application.add_handler(CommandHandler('today', today_command))
+        application.add_handler(CommandHandler('cancel', cancel))
+        application.add_handler(CommandHandler('start', start))
+        application.add_handler(CommandHandler('s', skip_command))
+
+        # ثانياً: معالج المحادثة
+        application.add_handler(conv_handler)
+
+        # ثالثاً: معالج الأزرار لأي رسالة نصية لم تتم معالجتها في المحادثة
         button_handler = MessageHandler(
             filters.TEXT & ~filters.COMMAND, handle_button_clicks
         )
         application.add_handler(button_handler)
-        
-        # إضافة معالج للردود العامة
+
+        # رابعاً: معالج الردود العامة
         application.add_handler(CallbackQueryHandler(gemini_callback_handler))
         
         # بدء البوت
