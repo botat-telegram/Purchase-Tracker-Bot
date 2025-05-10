@@ -457,7 +457,7 @@ async def get_products(limit: int = 10) -> list:
         limit (int): عدد المنتجات التي يجب إرجاعها (افتراضي: 10)
         
     تعيد:
-        قائمة بالمنتجات
+        قائمة بالمنتجات، كل منتج يحتوي على رقم الصف الفعلي (sheet_row)، مرتبة بحيث آخر المنتجات المضافة تكون أولاً
     """
     global DEMO_MODE
     
@@ -465,7 +465,12 @@ async def get_products(limit: int = 10) -> list:
         # إرجاع المنتجات من القائمة المؤقتة
         if DEMO_PRODUCTS:
             # إرجاع آخر منتجات مضافة، بحد أقصى limit
-            return DEMO_PRODUCTS[-limit:]
+            # إضافة sheet_row وهمي (للوضع التجريبي)
+            demo = DEMO_PRODUCTS[-limit:]
+            for idx, p in enumerate(demo):
+                p['sheet_row'] = idx + 2  # الصفوف تبدأ من 2
+            # عكس الترتيب ليكون آخر المنتجات أولاً
+            return list(reversed(demo))
         else:
             # إذا لم تكن هناك منتجات، نعيد بيانات تجريبية
             demo_products = [
@@ -473,13 +478,15 @@ async def get_products(limit: int = 10) -> list:
                     'date': format_date(datetime.now()),
                     'name': 'كولا',
                     'price': 23.0,
-                    'notes': 'مثال تجريبي'
+                    'notes': 'مثال تجريبي',
+                    'sheet_row': 2
                 },
                 {
                     'date': format_date(datetime.now()),
                     'name': 'شيبس',
                     'price': 15.0,
-                    'notes': 'حار'
+                    'notes': 'حار',
+                    'sheet_row': 3
                 }
             ]
             return demo_products
@@ -494,29 +501,244 @@ async def get_products(limit: int = 10) -> list:
         # الحصول على جميع القيم
         values = worksheet.get_all_values()
         
-        # تحويل القيم إلى قائمة من القواميس
+        # تحويل القيم إلى قائمة من القواميس مع رقم الصف الفعلي
         products = []
         # تخطي الصف الأول (العناوين)
-        for row in values[1:]:
+        for idx, row in enumerate(values[1:], start=2):  # الصف 2 هو أول منتج فعلي
             try:
                 if len(row) >= 3:
                     products.append({
                         'date': row[0],
                         'name': row[1],
                         'price': float(row[2]),
-                        'notes': row[3] if len(row) > 3 else ''
+                        'notes': row[3] if len(row) > 3 else '',
+                        'sheet_row': idx
                     })
             except (IndexError, ValueError) as e:
                 logger.warning(f"خطأ في تحويل الصف {row}: {str(e)}")
                 continue
-        
-        # الحصول على آخر المنتجات فقط
-        return products[-limit:] if products else []
+        # الحصول على آخر المنتجات فقط، مع عكس الترتيب ليكون آخر المنتجات أولاً
+        return list(reversed(products[-limit:])) if products else []
         
     except Exception as e:
         logger.error(f"خطأ في الحصول على المنتجات: {str(e)}")
         DEMO_MODE = True
         return await get_products(limit)
+
+@with_retry
+async def delete_product(index: int) -> bool:
+    """
+    حذف منتج من قاعدة البيانات حسب الفهرس
+    
+    Args:
+        index: فهرس المنتج في جدول البيانات (الصف بدءًا من 2)
+        
+    Returns:
+        bool: True في حالة النجاح، False في حالة الفشل
+    """
+    global DEMO_MODE, DEMO_PRODUCTS
+    
+    logger.info(f"محاولة حذف المنتج بالفهرس {index}")
+    
+    if DEMO_MODE:
+        try:
+            # في الوضع التجريبي، نحذف من القائمة المحلية
+            if 0 <= index < len(DEMO_PRODUCTS):
+                deleted_product = DEMO_PRODUCTS.pop(index)
+                logger.info(f"تم حذف المنتج: {deleted_product.get('name', 'غير معروف')} من القائمة المحلية")
+                save_demo_products()
+                return True
+            else:
+                logger.error(f"فهرس غير صالح: {index}, العدد الكلي للمنتجات: {len(DEMO_PRODUCTS)}")
+                return False
+        except Exception as e:
+            logger.error(f"فشل في حذف المنتج: {str(e)}")
+            logger.error(traceback.format_exc())
+            return False
+    
+    try:
+        # استخدام دالة delete_products للحذف بشكل متسق
+        success_count, failed_indices = await delete_products([index])
+        return success_count > 0
+        
+    except Exception as e:
+        logger.error(f"فشل في حذف المنتج: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+@with_retry
+async def delete_products(indices: list) -> Tuple[int, list]:
+    """
+    حذف عدة منتجات من قاعدة البيانات
+    
+    Args:
+        indices: قائمة بأرقام الصفوف الفعلية للمنتجات المراد حذفها (sheet_row)
+        
+    Returns:
+        Tuple[int, list]: (عدد المنتجات التي تم حذفها بنجاح، قائمة بالفهارس التي فشل حذفها)
+    """
+    global DEMO_MODE, DEMO_PRODUCTS
+    
+    logger.info(f"محاولة حذف {len(indices)} منتج بأرقام الصفوف: {indices}")
+    
+    success_count = 0
+    failed_indices = []
+    
+    # تحقق من الفهارس وإصلاحها إذا لزم الأمر
+    valid_indices = []
+    for i in indices:
+        try:
+            if isinstance(i, str):
+                i = int(i.strip())
+            elif not isinstance(i, int):
+                logger.warning(f"تخطي فهرس غير صالح: {i} (النوع: {type(i)})")
+                failed_indices.append(i)
+                continue
+                
+            valid_indices.append(i)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"فشل في تحويل الفهرس: {i}, خطأ: {str(e)}")
+            failed_indices.append(i)
+    
+    if not valid_indices:
+        logger.warning("لا توجد فهارس صالحة للحذف")
+        return 0, failed_indices
+    
+    # في الوضع التجريبي
+    if DEMO_MODE:
+        logger.info(f"محاولة حذف من القائمة المحلية، عدد المنتجات: {len(DEMO_PRODUCTS)}")
+        
+        # احتفاظ بالمنتجات الجديدة بعد الحذف
+        new_products = []
+        deleted_products = []
+        
+        for idx, product in enumerate(DEMO_PRODUCTS):
+            # تحديد ما إذا كان يجب الاحتفاظ بهذا المنتج
+            # المنتج له قيمة sheet_row مساوية للفهرس أو ليس له sheet_row وموضعه في القائمة مساوٍ للفهرس
+            sheet_row = product.get('sheet_row', idx + 2)  # بشكل افتراضي، استخدم الموقع + 2 (لتخطي صف العنوان)
+            
+            if sheet_row in valid_indices:
+                # هذا منتج مراد حذفه
+                logger.info(f"حذف المنتج: {product.get('name', 'غير معروف')} من الصف {sheet_row}")
+                deleted_products.append(product)
+                success_count += 1
+            else:
+                # احتفظ بهذا المنتج
+                new_products.append(product)
+        
+        # تحديث القائمة المحلية
+        if success_count > 0:
+            logger.info(f"تم حذف {success_count} منتج: {[p.get('name', 'غير معروف') for p in deleted_products]}")
+            DEMO_PRODUCTS = new_products
+            save_demo_products()
+            
+        logger.info(f"نتيجة عملية الحذف (وضع تجريبي): {success_count} نجاح، {len(failed_indices)} فشل")
+        return success_count, failed_indices
+    
+    # للوضع العادي (Google Sheets)
+    try:
+        # الحصول على ورقة العمل
+        worksheet = get_worksheet()
+        
+        # إذا تم تحويل الوضع إلى تجريبي في get_worksheet
+        if DEMO_MODE:
+            return await delete_products(indices)
+            
+        # الحصول على جميع الصفوف
+        all_rows = worksheet.get_all_values()
+        num_rows = len(all_rows)
+        
+        # التحقق من أن لدينا صفوف كافية
+        if num_rows <= 1:  # فقط عنوان
+            logger.warning("لا توجد صفوف للحذف")
+            return 0, valid_indices
+        
+        # ترتيب أرقام الصفوف تنازليًا (مهم للحذف!)
+        sorted_indices = sorted(valid_indices, reverse=True)
+        logger.info(f"أرقام الصفوف للحذف بعد الترتيب: {sorted_indices}")
+        
+        # تسجيل معلومات الصفوف
+        logger.info(f"إجمالي عدد الصفوف في الجدول: {num_rows}")
+        
+        # تحديد عدد الأعمدة في الورقة
+        num_cols = len(all_rows[0]) if all_rows else 5  # استخدام 5 أعمدة افتراضية
+        
+        # الحد الأقصى للأعمدة هو 26 (من A إلى Z)
+        if num_cols > 26:
+            num_cols = 26
+        
+        for row_index in sorted_indices:
+            try:
+                if row_index <= 1:
+                    # لا نريد حذف صف العنوان (الصف 1)
+                    logger.error(f"محاولة حذف صف العنوان أو صف غير صالح: {row_index}")
+                    failed_indices.append(row_index)
+                    continue
+                
+                if row_index > num_rows:
+                    logger.error(f"الصف {row_index} غير موجود. عدد الصفوف: {num_rows}")
+                    failed_indices.append(row_index)
+                    continue
+                
+                # طباعة محتوى الصف قبل الحذف للتحقق
+                try:
+                    if row_index <= len(all_rows):
+                        row_content = all_rows[row_index - 1]  # التعديل من 1-based إلى 0-based للوصول للقائمة
+                        logger.info(f"محتوى الصف {row_index} قبل الحذف: {row_content}")
+                except Exception as e:
+                    logger.warning(f"لا يمكن طباعة محتوى الصف {row_index}: {str(e)}")
+                
+                # إنشاء صف فارغ للاستبدال - نفس عدد الأعمدة الموجودة في الجدول
+                empty_row_values = [['' for _ in range(num_cols)]]
+                
+                # تحديد نطاق الصف بطريقة صحيحة
+                # نستخدم الأحرف من A إلى آخر عمود (على سبيل المثال A:E للخمسة أعمدة الأولى)
+                last_column_letter = chr(64 + num_cols)  # 65 = 'A', 66 = 'B', إلخ
+                cell_range = f'A{row_index}:{last_column_letter}{row_index}'
+                
+                logger.info(f"محاولة مسح النطاق: {cell_range} باستخدام batch_update")
+                
+                try:
+                    # تحديث الصف بقيم فارغة باستخدام batch_update
+                    worksheet.batch_update([{
+                        'range': cell_range,
+                        'values': empty_row_values
+                    }])
+                    
+                    logger.info(f"تم مسح محتويات الصف {row_index} بنجاح")
+                    success_count += 1
+                except Exception as batch_error:
+                    logger.error(f"فشل في استخدام batch_update لحذف الصف {row_index}: {str(batch_error)}")
+                    
+                    # محاولة بديلة باستخدام update_cell
+                    try:
+                        logger.info(f"محاولة حذف الصف {row_index} باستخدام update_cell لكل عمود...")
+                        
+                        # مسح كل خلية على حدة
+                        for col in range(1, num_cols + 1):
+                            worksheet.update_cell(row_index, col, '')
+                        
+                        logger.info(f"تم مسح محتويات الصف {row_index} باستخدام update_cell")
+                        success_count += 1
+                    except Exception as cell_error:
+                        logger.error(f"فشل في حذف الصف {row_index}: {str(cell_error)}")
+                        failed_indices.append(row_index)
+                        
+            except Exception as e:
+                logger.error(f"فشل في حذف الصف {row_index}: {str(e)}")
+                logger.error(traceback.format_exc())
+                failed_indices.append(row_index)
+        
+        logger.info(f"نتيجة عملية الحذف: {success_count} نجاح، {len(failed_indices)} فشل")
+        return success_count, failed_indices
+        
+    except Exception as e:
+        logger.error(f"خطأ عام في عملية الحذف: {str(e)}")
+        logger.error(traceback.format_exc())
+        for idx in valid_indices:
+            if idx not in failed_indices:
+                failed_indices.append(idx)
+        return 0, failed_indices
 
 load_dotenv()
 GOOGLE_SHEETS_KEY = os.getenv("GOOGLE_SHEETS_KEY")

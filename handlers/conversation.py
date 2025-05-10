@@ -124,6 +124,13 @@ def parse_product_line(line: str) -> tuple:
 
 async def handle_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """معالج أي رسالة نصية"""
+    # التحقق مما إذا كنا في حالة حذف المنتجات
+    if context.user_data.get('delete_type'):
+        # نحن في حالة حذف، لذا لا نقوم بمعالجة الرسالة هنا
+        # وبدلاً من ذلك نترك handler معالجة الحذف يقوم بذلك
+        logger.info("تخطي معالجة الرسالة في handle_any_message لأننا في حالة حذف")
+        return None
+    
     text = update.message.text.strip()
     
     # تحقق مما إذا كان النص يحتوي على أسطر متعددة

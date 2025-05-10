@@ -41,7 +41,8 @@ try:
     from handlers.commands import (
         start, cancel, skip_command, help_command, 
         last_products_command, handle_button_clicks,
-        handle_callback_query, last_ten_command, today_command
+        handle_callback_query, last_ten_command, today_command,
+        handle_delete_selection, handle_delete_confirm, DELETE_SELECTION, DELETE_CONFIRM
     )
     from handlers.gemini_integration import gemini_callback_handler, GEMINI_CONFIRM, GEMINI_SELECT
 except ImportError as e:
@@ -122,19 +123,13 @@ def is_bot_running():
     
     try:
         if os.path.exists(pid_file):
-            with open(pid_file, 'r') as f:
-                try:
-                    old_pid = int(f.read().strip())
-                    try:
-                        # محاولة إرسال إشارة 0 للتحقق من وجود العملية
-                        os.kill(old_pid, 0)
-                        return True
-                    except OSError:
-                        # العملية غير موجودة، حذف الملف القديم
-                        os.remove(pid_file)
-                except ValueError:
-                    # محتوى الملف غير صالح، حذف الملف
-                    os.remove(pid_file)
+            try:
+                # محاولة حذف الملف أولاً لتجنب التعارضات
+                os.remove(pid_file)
+                logger.info("تم حذف ملف PID قديم")
+            except Exception as e:
+                logger.warning(f"تعذر حذف ملف PID: {str(e)}")
+                return False
                     
         # كتابة PID الحالي
         with open(pid_file, 'w') as f:
@@ -215,7 +210,44 @@ def main() -> None:
         GEMINI_CONFIRM_STATE = GEMINI_CONFIRM
         GEMINI_SELECT_STATE = GEMINI_SELECT
         
-        # إعداد المحادثة
+        # إضافة معالجات الأوامر أولًا
+        application.add_handler(CommandHandler('help', help_command))
+        application.add_handler(CommandHandler('last', last_products_command))
+        application.add_handler(CommandHandler('last10', last_ten_command, filters.Regex(r'^/last10$')))
+        application.add_handler(CommandHandler('today', today_command, filters.Regex(r'^/today$')))
+        application.add_handler(CommandHandler('cancel', cancel))
+        application.add_handler(CommandHandler('start', start))
+        application.add_handler(CommandHandler('s', skip_command))
+        
+        # إنشاء محادثة خاصة لعملية الحذف
+        delete_handler = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(handle_callback_query, pattern="^delete_today$"),
+                CallbackQueryHandler(handle_callback_query, pattern="^delete_last10$"),
+            ],
+            states={
+                DELETE_SELECTION: [
+                    MessageHandler(filters.TEXT & filters.Regex(r'^❌ إلغاء العملية$'), cancel),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_delete_selection),
+                ],
+                DELETE_CONFIRM: [
+                    CallbackQueryHandler(handle_delete_confirm, pattern=r"^(confirm_delete|cancel_delete)$"),
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel)],
+            name="delete_conversation",
+            persistent=False,
+        )
+
+        # التأكد من إضافة معالج الحذف أولًا قبل أي معالجات أخرى
+        logger.info("جاري إضافة معالج الحذف...")
+        application.add_handler(delete_handler)
+
+        # إضافة معالجات للأزرار العامة
+        application.add_handler(CallbackQueryHandler(handle_callback_query, pattern="^total_"))
+        application.add_handler(CallbackQueryHandler(handle_callback_query, pattern="^skip_notes$"))
+
+        # إعداد المحادثة الرئيسية
         conv_handler = ConversationHandler(
             entry_points=[
                 CommandHandler('start', start),
@@ -235,7 +267,7 @@ def main() -> None:
                     MessageHandler(filters.TEXT & filters.Regex(r'^❌ إلغاء العملية$'), cancel),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, notes),
                     CommandHandler('s', skip_command),
-                    CallbackQueryHandler(handle_callback_query),
+                    CallbackQueryHandler(handle_callback_query, pattern=r"^skip_notes$"),
                 ],
                 # إضافة حالات Gemini بشكل صريح
                 GEMINI_CONFIRM_STATE: [
@@ -246,29 +278,22 @@ def main() -> None:
                 ],
             },
             fallbacks=[CommandHandler('cancel', cancel)],
+            name="main_conversation",
+            persistent=False,
+            per_message=False
         )
-        
-        # إضافة المعالجات بترتيب مناسب
-        # أولاً: معالجات الأوامر
-        application.add_handler(CommandHandler('help', help_command))
-        application.add_handler(CommandHandler('last', last_products_command))
-        application.add_handler(CommandHandler('last10', last_ten_command))
-        application.add_handler(CommandHandler('today', today_command))
-        application.add_handler(CommandHandler('cancel', cancel))
-        application.add_handler(CommandHandler('start', start))
-        application.add_handler(CommandHandler('s', skip_command))
 
-        # ثانياً: معالج المحادثة
+        # إضافة معالج المحادثة الرئيسية بعد معالج الحذف
         application.add_handler(conv_handler)
 
-        # ثالثاً: معالج الأزرار لأي رسالة نصية لم تتم معالجتها في المحادثة
-        button_handler = MessageHandler(
-            filters.TEXT & ~filters.COMMAND, handle_button_clicks
-        )
-        application.add_handler(button_handler)
+        # معالج عام للأزرار التي لم يتم التعامل معها بعد
+        general_button_handler = CallbackQueryHandler(handle_callback_query)
+        application.add_handler(general_button_handler)
 
-        # رابعاً: معالج الردود العامة
-        application.add_handler(CallbackQueryHandler(gemini_callback_handler))
+        # معالج الرسائل النصية لأزرار الواجهة
+        application.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND, handle_button_clicks
+        ))
         
         # بدء البوت
         logger.info("جاري بدء البوت...")
